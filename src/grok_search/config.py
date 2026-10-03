@@ -95,6 +95,22 @@ class Config:
         return key
 
     @property
+    def searxng_base_url(self) -> str:
+        return os.getenv("SEARXNG_BASE_URL", "").strip().rstrip("/")
+
+    @property
+    def searxng_engines(self) -> str:
+        return os.getenv("SEARXNG_ENGINES", "").strip()
+
+    @property
+    def searxng_timeout(self) -> float:
+        return float(os.getenv("SEARXNG_TIMEOUT", "30"))
+
+    @property
+    def searxng_summarize(self) -> bool:
+        return os.getenv("SEARXNG_SUMMARIZE", "true").lower() in ("true", "1", "yes")
+
+    @property
     def tavily_enabled(self) -> bool:
         return os.getenv("TAVILY_ENABLED", "true").lower() in ("true", "1", "yes")
 
@@ -194,13 +210,18 @@ class Config:
         except ValueError as e:
             api_url = "未配置"
             api_key_masked = "未配置"
-            config_status = f"❌ 配置错误: {str(e)}"
+            config_status = "✅ SearXNG 搜索可用（未配置 Grok 摘要）" if self.searxng_base_url else f"❌ 配置错误: {str(e)}"
 
         info = {
             "GUDA_BASE_URL": self.guda_base_url,
             "GUDA_API_KEY": self._mask_api_key(self.guda_api_key) if self.guda_api_key else "未配置",
             "GROK_API_URL": api_url,
             "GROK_API_KEY": api_key_masked,
+            "SEARCH_PROVIDER": "searxng" if self.searxng_base_url else "grok",
+            "SEARXNG_BASE_URL": self.searxng_base_url or "未配置",
+            "SEARXNG_ENGINES": self.searxng_engines or "实例默认",
+            "SEARXNG_TIMEOUT": self.searxng_timeout,
+            "SEARXNG_SUMMARIZE": self.searxng_summarize,
             "GROK_MODEL": self.grok_model,
             "GROK_DEBUG": self.debug_enabled,
             "GROK_LOG_LEVEL": self.log_level,

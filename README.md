@@ -1,3 +1,5 @@
+> **此 fork 新增 SearXNG 搜索后端**：检索真实信源，再由 Grok 整理回答。配置见 [SearXNG 使用说明](docs/SEARXNG.md)。
+
 ![这是图片](./images/title.png)
 <div align="center">
 

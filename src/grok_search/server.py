@@ -13,12 +13,14 @@ from pydantic import Field
 # 尝试使用绝对导入（支持 mcp run）
 try:
     from grok_search.providers.grok import GrokSearchProvider
+    from grok_search.providers import searxng
     from grok_search.logger import log_info
     from grok_search.config import config
     from grok_search.sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
     from grok_search.planning import engine as planning_engine, _split_csv
 except ImportError:
     from .providers.grok import GrokSearchProvider
+    from .providers import searxng
     from .logger import log_info
     from .config import config
     from .sources import SourcesCache, merge_sources, new_session_id, split_answer_and_sources
@@ -111,16 +113,61 @@ def _extra_results_to_sources(
     return sources
 
 
+async def _search_with_searxng(query: str, platform: str, model: str, extra_sources: int) -> dict:
+    import httpx
+
+    session_id = new_session_id()
+    try:
+        sources, unavailable = await searxng.search(query, platform, extra_sources or 8)
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:
+        await _SOURCES_CACHE.set(session_id, [])
+        return {"session_id": session_id, "content": f"SearXNG 搜索失败: {e}",
+                "sources_count": 0, "error": "searxng_search_failed"}
+
+    await _SOURCES_CACHE.set(session_id, sources)
+    result = {"session_id": session_id, "content": "", "sources_count": len(sources),
+              "search_provider": "searxng", "unresponsive_engines": unavailable}
+    if not sources:
+        result["content"] = "SearXNG 未返回搜索结果。"
+        if unavailable:
+            result["content"] += f" 不可用引擎: {unavailable}"
+        return result
+
+    raw_results = "## SearXNG 搜索结果\n\n" + searxng.format_results(sources)
+    result["content"] = raw_results
+    if config.searxng_summarize:
+        try:
+            api_url, api_key = config.grok_api_url, config.grok_api_key
+        except ValueError:
+            return result
+        effective_model = model or config.grok_model
+        if model:
+            available = await _get_available_models_cached(api_url, api_key)
+            if available and model not in available:
+                result.update(content=f"无效模型: {model}\n\n{raw_results}", error="invalid_model")
+                return result
+        try:
+            summary = await GrokSearchProvider(api_url, api_key, effective_model).summarize(query, sources, platform)
+            answer, _ = split_answer_and_sources(summary)
+            if answer:
+                result["content"] = answer + "\n\n" + raw_results
+        except Exception:
+            # Search results remain usable if the optional summarizer is unavailable.
+            result["summary_error"] = "Grok 摘要失败，已返回原始搜索结果。"
+    return result
+
+
 @mcp.tool(
     name="web_search",
     output_schema=None,
     description="""
     Before using this tool, please use the plan_intent tool to plan the search carefully.
-    Performs a deep web search based on the given query and returns Grok's answer directly.
+    Searches SearXNG when SEARXNG_BASE_URL is configured, otherwise uses Grok's native search.
+    SearXNG mode returns real result snippets, optionally summarized by Grok.
 
     This tool extracts sources if provided by upstream, caches them, and returns:
     - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
-    - content: string (answer only)
+    - content: string (answer; SearXNG mode also includes retrieved result snippets)
     - sources_count: int
     """,
     meta={"version": "2.0.0", "author": "guda.studio"},
@@ -129,8 +176,10 @@ async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
-    extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
+    extra_sources: Annotated[int, Field(description="Additional Tavily/Firecrawl sources; in SearXNG mode the result limit (0 = 8).", ge=0, le=50)] = 0,
 ) -> dict:
+    if config.searxng_base_url:
+        return await _search_with_searxng(query, platform, model, extra_sources)
     session_id = new_session_id()
     try:
         api_url = config.grok_api_url
