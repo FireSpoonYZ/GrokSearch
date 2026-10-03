@@ -213,10 +213,14 @@ async def web_search(
             tavily_count = extra_sources
 
     # 并行执行搜索任务
+    grok_error = None
+
     async def _safe_grok() -> str:
+        nonlocal grok_error
         try:
             return await grok_provider.search(query, platform)
-        except Exception:
+        except Exception as e:
+            grok_error = f"{type(e).__name__}: {e}"
             return ""
 
     async def _safe_tavily() -> list[dict] | None:
@@ -256,7 +260,13 @@ async def web_search(
     all_sources = merge_sources(grok_sources, extra)
 
     await _SOURCES_CACHE.set(session_id, all_sources)
-    return {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
+    result = {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
+    if grok_error:
+        result["error"] = "grok_search_failed"
+        result["content"] = f"Grok 原生搜索失败: {grok_error}。可配置 SEARXNG_BASE_URL 使用本地搜索后端。"
+    elif not all_sources:
+        result["warning"] = "未收到可验证信源；请勿将此回答视为已联网检索的结果。"
+    return result
 
 
 @mcp.tool(

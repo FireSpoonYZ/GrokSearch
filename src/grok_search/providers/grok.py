@@ -2,11 +2,11 @@ import httpx
 import json
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
+from typing import Optional
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 from tenacity.wait import wait_base
 from zoneinfo import ZoneInfo
-from .base import BaseSearchProvider, SearchResult
+from .base import BaseSearchProvider
 from ..utils import search_prompt, fetch_prompt, url_describe_prompt, rank_sources_prompt
 from ..logger import log_info
 from ..config import config
@@ -117,6 +117,29 @@ class _WaitWithRetryAfter(wait_base):
             return None
 
 
+def _responses_answer(data: dict) -> str:
+    if data.get("status") in ("failed", "incomplete"):
+        raise ValueError("Grok Responses request did not complete")
+    texts, sources = [], []
+    seen = set()
+    for item in data.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content", []):
+            if part.get("type") != "output_text":
+                continue
+            texts.append(part.get("text", ""))
+            for citation in part.get("annotations", []):
+                url = citation.get("url")
+                if citation.get("type") == "url_citation" and isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
+                    seen.add(url)
+                    sources.append({"url": url, "title": citation.get("title", ""), "provider": "grok"})
+    answer = chr(10).join(texts)
+    if sources:
+        answer += chr(10) * 2 + "Sources" + chr(10) + json.dumps(sources, ensure_ascii=False)
+    return answer
+
+
 class GrokSearchProvider(BaseSearchProvider):
     def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast"):
         super().__init__(api_url, api_key)
@@ -125,7 +148,7 @@ class GrokSearchProvider(BaseSearchProvider):
     def get_provider_name(self) -> str:
         return "Grok"
 
-    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None) -> List[SearchResult]:
+    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -139,19 +162,15 @@ class GrokSearchProvider(BaseSearchProvider):
 
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": search_prompt,
-                },
-                {"role": "user", "content": time_context + query + platform_prompt},
-            ],
+            "instructions": search_prompt + " Use the provided web_search tool and return the final answer with URL citations, not a search plan.",
+            "input": time_context + query + platform_prompt,
+            "tools": [{"type": "web_search"}],
             "stream": True,
         }
 
         await log_info(ctx, f"platform_prompt: { query + platform_prompt}", config.debug_enabled)
 
-        return await self._execute_stream_with_retry(headers, payload, ctx)
+        return await self._execute_stream_with_retry(headers, payload, ctx, endpoint="/responses")
 
     async def summarize(self, query: str, sources: list[dict], platform: str = "") -> str:
         """Answer from retrieved snippets without requiring upstream web-search tools."""
@@ -195,46 +214,54 @@ class GrokSearchProvider(BaseSearchProvider):
 
     async def _parse_streaming_response(self, response, ctx=None) -> str:
         content = ""
-        full_body_buffer = [] 
-        
+        full_body_buffer = []
+        native_response = None
+        saw_native_event = False
+
         async for line in response.aiter_lines():
             line = line.strip()
             if not line:
                 continue
-            
             full_body_buffer.append(line)
-
-            # 兼容 "data: {...}" 和 "data:{...}" 两种 SSE 格式
             if line.startswith("data:"):
                 if line in ("data: [DONE]", "data:[DONE]"):
                     continue
                 try:
-                    # 去掉 "data:" 前缀，并去除可能的空格
-                    json_str = line[5:].lstrip()
-                    data = json.loads(json_str)
-                    choices = data.get("choices", [])
-                    if choices and len(choices) > 0:
-                        delta = choices[0].get("delta", {})
-                        if "content" in delta:
-                            content += delta["content"]
-                except (json.JSONDecodeError, IndexError):
+                    data = json.loads(line[5:].lstrip())
+                except json.JSONDecodeError:
                     continue
-                
-        if not content and full_body_buffer:
+                event_type = data.get("type", "")
+                if event_type.startswith("response."):
+                    saw_native_event = True
+                if event_type in ("response.failed", "response.incomplete", "error"):
+                    raise ValueError(f"Grok Responses request did not complete: {event_type}")
+                if event_type == "response.output_text.delta":
+                    content += data.get("delta", "")
+                elif event_type == "response.completed":
+                    native_response = data["response"]
+                else:
+                    choices = data.get("choices", [])
+                    if choices:
+                        content += choices[0].get("delta", {}).get("content") or ""
+
+        if saw_native_event:
+            if native_response is None:
+                raise ValueError("Grok Responses stream ended before response.completed")
+            content = _responses_answer(native_response)
+        elif not content and full_body_buffer:
             try:
-                full_text = "".join(full_body_buffer)
-                data = json.loads(full_text)
-                if "choices" in data and len(data["choices"]) > 0:
-                    message = data["choices"][0].get("message", {})
-                    content = message.get("content", "")
+                data = json.loads("".join(full_body_buffer))
+                if "output" in data:
+                    content = _responses_answer(data)
+                elif data.get("choices"):
+                    content = data["choices"][0].get("message", {}).get("content") or ""
             except json.JSONDecodeError:
                 pass
-        
-        await log_info(ctx, f"content: {content}", config.debug_enabled)
 
+        await log_info(ctx, f"content: {content}", config.debug_enabled)
         return content
 
-    async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
+    async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None, endpoint: str = "/chat/completions") -> str:
         """执行带重试机制的流式 HTTP 请求"""
         timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
 
@@ -248,7 +275,7 @@ class GrokSearchProvider(BaseSearchProvider):
                 with attempt:
                     async with client.stream(
                         "POST",
-                        f"{self.api_url}/chat/completions",
+                        f"{self.api_url.rstrip('/')}{endpoint}",
                         headers=headers,
                         json=payload,
                     ) as response:

@@ -2,7 +2,7 @@
 
 设置 `SEARXNG_BASE_URL` 后，`web_search` 会先向 SearXNG 的 `/search?format=json` 检索，再让 Grok 根据实际标题、URL 和摘要整理回答。信源来自 SearXNG 返回的数据，按原有 `session_id` 缓存，`get_sources` 接口保持兼容。
 
-原始结果也会随回答返回。Grok 未配置、摘要请求失败或设置 `SEARXNG_SUMMARIZE=false` 时仍可直接搜索。未设置 `SEARXNG_BASE_URL` 时保留上游的 Grok 原生搜索流程。
+原始结果也会随回答返回。Grok 未配置、摘要请求失败或设置 `SEARXNG_SUMMARIZE=false` 时仍可直接搜索。未设置 `SEARXNG_BASE_URL` 时使用 Grok Responses 原生搜索（接口需支持 `/responses` 和 `web_search` 工具）。修复说明见 [NATIVE_SEARCH.md](NATIVE_SEARCH.md)。
 
 ## 安装配置
 
