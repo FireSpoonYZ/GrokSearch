@@ -35,6 +35,26 @@
 
 接口必须支持 Responses 原生搜索工具。只支持普通 Chat Completions 的代理可以改用 [SearXNG 后端](SEARXNG.md)，由本 MCP 获取真实搜索结果，再交给模型整理。
 
+## 独立的 X/Twitter 搜索
+
+此 fork 提供两个独立 MCP 工具，内部共享模型校验、Responses 请求、引用解析与信源缓存：
+
+| MCP 工具 | 上游工具 | 检索范围 |
+|---|---|---|
+| `web_search(query, platform, model, extra_sources)` | `web_search` | 公共网页；配置 SearXNG 时使用 SearXNG |
+| `x_search(query, model)` | `x_search` | X/Twitter 公开帖子与账号，始终使用 Grok 原生搜索 |
+
+每次原生请求只声明选定的工具，不自动同时启用两种搜索。需要综合网页与 X 讨论时，调用方可分别调用两个 MCP 工具。`web_search(platform="Twitter")` 只会让网页查询聚焦该平台，不会切换为原生 X 搜索。
+
+例如：
+
+```text
+x_search(query="查找 @OpenAI 最近两条公开帖子，给出日期和直接帖子链接")
+get_sources(session_id="上一步返回的 session_id")
+```
+
+`x_search` 使用配置的默认模型，除非明确传入 `model`。返回字段与原生网页搜索一致：`session_id`、`content`、`sources_count`，另有 `search_tool=x_search`。即使配置了 SearXNG，它也不会将 X 查询转成网页搜索。上游不支持 X 搜索时返回明确错误。
+
 ## 验证范围
 
 新增测试覆盖：请求端点与工具声明、Responses 流式/非流式引用、未完成流、普通 Chat Completions 兼容、错误与无信源警告。真实 MCP stdio 测试中，修复后的原生搜索返回了 Python 官方首页及引用，`get_sources` 能取回信源。

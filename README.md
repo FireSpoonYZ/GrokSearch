@@ -1,4 +1,4 @@
-> **此 fork 新增 SearXNG 搜索后端**：检索真实信源，再由 Grok 整理回答。配置见 [SearXNG 使用说明](docs/SEARXNG.md)。同时修复了原生搜索只返回计划的问题，详见 [诊断与修复](docs/NATIVE_SEARCH.md)。
+> **此 fork 新增 SearXNG 搜索后端**：检索真实信源，再由 Grok 整理回答。配置见 [SearXNG 使用说明](docs/SEARXNG.md)。提供独立的原生 `x_search` 工具，并修复了原生搜索只返回计划的问题，详见 [原生网页/X 搜索与修复](docs/NATIVE_SEARCH.md)。
 
 ![这是图片](./images/title.png)
 <div align="center">

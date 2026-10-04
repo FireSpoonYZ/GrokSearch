@@ -129,7 +129,7 @@ class SearxNGTests(unittest.IsolatedAsyncioTestCase):
             return_value="Original answer\n\nSources\n- https://example.org/original"
         ) as search:
             data = await server.web_search("runtime")
-        search.assert_awaited_once_with("runtime", "")
+        search.assert_awaited_once_with("runtime", "", tool_type="web_search")
         self.assertEqual(data["content"], "Original answer")
         self.assertEqual(data["sources_count"], 1)
 

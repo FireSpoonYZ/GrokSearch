@@ -148,7 +148,7 @@ class GrokSearchProvider(BaseSearchProvider):
     def get_provider_name(self) -> str:
         return "Grok"
 
-    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None) -> str:
+    async def search(self, query: str, platform: str = "", min_results: int = 3, max_results: int = 10, ctx=None, *, tool_type: str = "web_search") -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -156,15 +156,15 @@ class GrokSearchProvider(BaseSearchProvider):
         platform_prompt = ""
 
         if platform:
-            platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform + "\n"
+            platform_prompt = "\n\nFocus the search on this platform: " + platform + "\n"
 
         time_context = get_local_time_info() + "\n"
 
         payload = {
             "model": self.model,
-            "instructions": search_prompt + " Use the provided web_search tool and return the final answer with URL citations, not a search plan.",
+            "instructions": search_prompt + f" Use only the provided {tool_type} tool and return the final answer with URL citations, not a search plan.",
             "input": time_context + query + platform_prompt,
-            "tools": [{"type": "web_search"}],
+            "tools": [{"type": tool_type}],
             "stream": True,
         }
 

@@ -157,29 +157,7 @@ async def _search_with_searxng(query: str, platform: str, model: str, extra_sour
     return result
 
 
-@mcp.tool(
-    name="web_search",
-    output_schema=None,
-    description="""
-    Before using this tool, please use the plan_intent tool to plan the search carefully.
-    Searches SearXNG when SEARXNG_BASE_URL is configured, otherwise uses Grok's native search.
-    SearXNG mode returns real result snippets, optionally summarized by Grok.
-
-    This tool extracts sources if provided by upstream, caches them, and returns:
-    - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
-    - content: string (answer; SearXNG mode also includes retrieved result snippets)
-    - sources_count: int
-    """,
-    meta={"version": "2.0.0", "author": "guda.studio"},
-)
-async def web_search(
-    query: Annotated[str, "Clear, self-contained natural-language search query."],
-    platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
-    model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
-    extra_sources: Annotated[int, Field(description="Additional Tavily/Firecrawl sources; in SearXNG mode the result limit (0 = 8).", ge=0, le=50)] = 0,
-) -> dict:
-    if config.searxng_base_url:
-        return await _search_with_searxng(query, platform, model, extra_sources)
+async def _search_with_grok(query: str, platform: str, model: str, extra_sources: int, tool_type: str = "web_search") -> dict:
     session_id = new_session_id()
     try:
         api_url = config.grok_api_url
@@ -218,7 +196,7 @@ async def web_search(
     async def _safe_grok() -> str:
         nonlocal grok_error
         try:
-            return await grok_provider.search(query, platform)
+            return await grok_provider.search(query, platform, tool_type=tool_type)
         except Exception as e:
             grok_error = f"{type(e).__name__}: {e}"
             return ""
@@ -260,26 +238,73 @@ async def web_search(
     all_sources = merge_sources(grok_sources, extra)
 
     await _SOURCES_CACHE.set(session_id, all_sources)
-    result = {"session_id": session_id, "content": answer, "sources_count": len(all_sources)}
+    result = {"session_id": session_id, "content": answer, "sources_count": len(all_sources), "search_tool": tool_type}
     if grok_error:
         result["error"] = "grok_search_failed"
-        result["content"] = f"Grok 原生搜索失败: {grok_error}。可配置 SEARXNG_BASE_URL 使用本地搜索后端。"
+        hint = "检查上游是否支持原生 x_search。" if tool_type == "x_search" else "可配置 SEARXNG_BASE_URL 使用本地搜索后端。"
+        result["content"] = f"Grok 原生搜索失败: {grok_error}。{hint}"
     elif not all_sources:
         result["warning"] = "未收到可验证信源；请勿将此回答视为已联网检索的结果。"
     return result
 
 
 @mcp.tool(
+    name="web_search",
+    output_schema=None,
+    description="""
+    Before using this tool, please use the plan_intent tool to plan the search carefully.
+    Searches SearXNG when SEARXNG_BASE_URL is configured, otherwise uses Grok's native search.
+    SearXNG mode returns real result snippets, optionally summarized by Grok.
+    Use x_search for native X/Twitter search; platform only focuses a web query.
+
+    This tool extracts sources if provided by upstream, caches them, and returns:
+    - session_id: string (When you feel confused or curious about the main content, use this field to invoke the get_sources tool to obtain the corresponding list of information sources)
+    - content: string (answer; SearXNG mode also includes retrieved result snippets)
+    - sources_count: int
+    """,
+    meta={"version": "2.0.0", "author": "guda.studio"},
+)
+async def web_search(
+    query: Annotated[str, "Clear, self-contained natural-language search query."],
+    platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
+    model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
+    extra_sources: Annotated[int, Field(description="Additional Tavily/Firecrawl sources; in SearXNG mode the result limit (0 = 8).", ge=0, le=50)] = 0,
+) -> dict:
+    if config.searxng_base_url:
+        return await _search_with_searxng(query, platform, model, extra_sources)
+    return await _search_with_grok(query, platform, model, extra_sources)
+
+
+@mcp.tool(
+    name="x_search",
+    output_schema=None,
+    description="""
+    Search public X/Twitter posts using Grok's native x_search tool through Responses.
+    Use this for posts, accounts, recent discussion, and direct X post links.
+    Searches X only; independent of SEARXNG_BASE_URL.
+    Returns session_id, content, sources_count and search_tool.
+    Retrieve cached citations with get_sources(session_id).
+    """,
+    meta={"version": "1.0.0", "author": "FireSpoonYZ"},
+)
+async def x_search(
+    query: Annotated[str, Field(description="X search request; may include handles or dates.", min_length=1)],
+    model: Annotated[str, "Optional model override, only when explicitly requested."] = "",
+) -> dict:
+    return await _search_with_grok(query, "X/Twitter", model, 0, tool_type="x_search")
+
+
+@mcp.tool(
     name="get_sources",
     description="""
     When you feel confused or curious about the search response content, use the session_id returned by web_search to invoke the this tool to obtain the corresponding list of information sources.
-    Retrieve all cached sources for a previous web_search call.
-    Provide the session_id returned by web_search to get the full source list.
+    Retrieve all cached sources for a previous web_search or x_search call.
+    Provide the session_id returned by web_search or x_search to get the full source list.
     """,
     meta={"version": "1.0.0", "author": "guda.studio"},
 )
 async def get_sources(
-    session_id: Annotated[str, "Session ID from previous web_search call."]
+    session_id: Annotated[str, "Session ID from a previous web_search or x_search call."]
 ) -> dict:
     sources = await _SOURCES_CACHE.get(session_id)
     if sources is None:
